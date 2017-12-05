@@ -1,0 +1,263 @@
+Terminating Connections
+-------------------------
+Before you can perform a full drop and restore of a database or restore a particular table that’s in use, you’ll need to kill connections. To cancel running queries or to terminate connections, you elicit three administrative functions.
+
+• pg_stat_activity (SELECT * FROM pg_stat_activity;) 
+is a view that will list currently active connections and the process id. Additionally, it’ll provide details of
+the active query running on each connection, the connected user (usename), the database (datname) in use, and start times of query currently running. You need this view to obtain the proc ids of connections that you wish to terminate.
+
+• pg_cancel_backend(procid) (SELECT pg_cancel_backend(procid);) 
+will cancel all active queries on a connection, but doesn’t terminate the connection.
+
+• pg_terminate_backend(procid) (SELECT pg_terminate_backend(procid);) 
+will kill a specific connection. All running queries will automatically cancel. This will be your
+weapon of choice prior to a restore to prevent an eager user from immediately restarting a cancelled query.
+
+PostgreSQL, unlike some other databases, lets you embed functions that perform actions within a regular SELECT query. This means that though pg_terminate_backend() and pg_cancel_backend() can only act on one connection at a time, you can effectuate
+multiple connections by wrapping them in a SELECT. 
+For example, let’s suppose a user (Regina) was hogging up resources and had 100 connections going. We can kill all her
+connections by running this command:
+Before 9.2:
+SELECT pg_terminate_backend(procpid) FROM pg_stat_activity WHERE usename = 'regina';
+
+9.2 and after:
+SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = 'regina';
+
+
+Killing a query
+------------------
+Trying to cancel the query first
+First, you may want to try pg_cancel_backend(pid), a milder version of pg_terminate_backend(pid);
+
+The difference between these two is that pg_cancel_backend() just cancels the current query, whereas pg_terminate_backend() really kills the backend (therefore, this can be used for idle or idle in transaction backends).
+
+You can use the following query to kill all backends that have an open transaction but have been doing nothing for the last 10 minutes:
+
+SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE state = 'idle in transaction'
+AND current_timestamp - query_start > '10 min';
+
+
+Terminating rogue connections
+------------------------------
+1. Connect to the database as a superuser and execute the following query for PostgreSQL 9.2 and higher versions:
+
+SELECT pid, client_port, state,
+now() - query_start AS duration, query
+FROM pg_stat_activity
+WHERE now() - query_start > INTERVAL '2 seconds'
+AND state != 'idle'
+ORDER BY duration DESC;
+
+3. Starting from the top, carefully examine the queries in this list. Make note of pid for any
+query that should be disconnected.
+
+4. Stop the currently executing query for the selected pids with the following query:
+
+SELECT pg_cancel_backend(pid);
+
+5. Execute the first query again and check the results for the targeted pid.
+
+6. If the query is still running or the state has switched to idle in transaction, execute the following query:
+
+SELECT pg_terminate_backend(pid);
+
+7. Execute the first query again and check the results for the targeted pid.
+
+8. If the query is still running, disconnect from the database and connect to the server as a root-capable user.
+
+9. Run the following command to terminate the client's network connection, using the
+contents of the client_port column:
+
+sudo tcpkill -i eth0 -9 port client_port
+
+10. Wait until the output from tcpkill resembles several identical lines.
+
+If a connected application encounters a bug and goes haywire, it might be convenient to disconnect several clients simultaneously. PostgreSQL lets us run query results through functions, so we could kill all connections that were idle in the transaction for at least 2 minutes by running this query as a superuser:
+
+SELECT pg_terminate_backend(pid)
+FROM pg_stat_activity
+WHERE now() - query_start > INTERVAL '2 minutes'
+AND state = 'idle in transaction';
+
+----------------------------------------
+Pushing users off the system (Kill users)
+---------------------------------------
+You can terminate a user's session with the pg_terminate_backend() function included with PostgreSQL. That function takes the PID, or the process ID, of the user's session on the server. This process is known as the backend, and it is a different system process from the
+program that runs the client.
+Some of the columns used in this recipe had a different name in version 9.1 and before:
+
+pid was called procpid
+query was called current_query
+
+The queries in this recipe are written for PostgreSQL 9.4, the most recent stable version at the time of writing this book. They work without changes on versions 9.3 and 9.2. To run them on prior versions, you only have to replace each occurrence of pid with procpid and query with current_query.
+
+
+To find the PID of a user, we can look at the pg_stat_activity view. We can use it in a query, like this:
+
+1. postgres=#SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE ...
+
+There are a couple of things to note if you run this query. If the WHERE clause doesn't match any sessions, then you won't get any output from the query. Similarly, if it matches multiple rows, you will get a fairly useless result, that is, a list of boolean true values. Unless you are careful enough to exclude your own session from the query, you will disconnect yourself!
+
+What's even funnier is that you'll disconnect yourself halfway through disconnecting the other users, as the query will run pg_terminate_backend() in the order in which sessions are returned from the outer query.
+
+Therefore, I suggest a safer and more useful query that gives a useful response in all cases, which is as follows:
+
+2. postgres=# SELECT count(pg_terminate_backend(pid)) FROM pg_stat_activity
+WHERE usename NOT IN
+(SELECT usename
+FROM pg_user
+WHERE usesuper);
+
+count
+-------
+1
+
+This is assuming that superusers are performing administrative tasks.
+
+Other good filters might be the following:
+WHERE application_name = 'myappname'
+WHERE waiting
+WHERE query = '<IDLE> in transaction'
+WHERE query = '<IDLE>'
+
+>>>>>>How it works…
+The pg_terminate_backend() function sends a signal directly to the operating system process for that session.
+It's possible that the session may have closed by the time pg_terminate_backend() is named. As PID numbers are assigned by the operating system, it could even happen that you try to terminate a given session (call it "session A"), but you actually terminate another session
+(call it "session B").
+
+Here is how it could happen. Suppose you take note of the PID of session A and decide to disconnect it. Before you actually issue pg_terminate_backend(), session A disconnects, and right after, a new session B is given exactly the same PID. So, when you terminate that
+PID, you hit session B instead.
+
+On one hand, you need to be careful. On the other hand, this case is really unlikely, and is only mentioned for completeness. For it to happen, all the following events must happen as well:
+One of the sessions you are trying to close must terminate independently in the very short interval between the moment pg_stat_activity is read and the moment pg_terminate_backend() is executed
+
+Another session on the same database server must be started in the even shorter interval between the old session closing and the execution of pg_terminate_backend()
+The new session must get exactly the same PID value as the old session, which is less than 1 chance in 32,000 on a 32-bit Linux machine.
+
+
+Preventing new connections
+---------------------------
+In certain emergencies, you may need to lock down the server completely, or just prevent specific users from accessing the database. It's hard to foresee all the situations in which you might need to do this, so we present a range of options.
+
+Connections can be prevented in a number of ways, as follows:
+
+1. Pause and resume the session pool. 
+
+2. Stop the server
+Restrict the connections for a specific database to zero, by setting the connection limit to zero:
+
+ALTER DATABASE foo_db CONNECTION LIMIT 0;
+This will limit normal users from connecting to that database, though it will still allow superuser connections.
+
+3. Restrict the connections for a specific user to zero by setting the connection limit to zero 
+
+ALTER USER foo CONNECTION LIMIT 0;
+
+This will limit normal users from connecting to that database, but it will still allow connections if the user is a superuser, so luckily you cannot shut yourself out accidentally.
+
+4. Change the host-based authentication (HBA) file to refuse all incoming connections, and then reload the server:
+
+Create a new file named pg_hba_lockdown.conf, and add the following two lines to the file. This puts in place rules that will completely lock down the server, including superusers. You should have no doubt that this is a serious and drastic action:
+# TYPE DATABASE USER CIDR-ADDRESS METHOD
+local all all reject
+host all all 0.0.0.0/0 reject
+
+If you still want superuser access, then try something like the following:
+# TYPE DATABASE USER CIDR-ADDRESS METHOD
+local all postgres peer
+local all all reject
+host all all 0.0.0.0/0 reject
+
+This will prevent connections to the database by any user except the postgres operating system user ID, which connects locally to any database. Be careful not to confuse the second and third columns—the second column is the database and the third column is the username. It's worth keeping the header line just for that reason. The peer method should be replaced by other authentication methods if a more complex configuration is in use.
+In versions prior to 9.1, you need to use the ident method to obtain this behavior for local connections.
+
+Restricting users to only one session each
+-------------------------------------------
+If resources need to be closely controlled, you may wish to restrict users so that they can only connect at most once to the server. The same technique can be used to prevent connections entirely for that user.
+
+We can restrict users to only one connection using the following command:
+
+postgres=# ALTER ROLE fred CONNECTION LIMIT 1;
+
+This will then cause any additional connections to receive the error message:
+
+FATAL: too many connections for role "fred".
+You can eliminate this restriction by setting the value to -1.
+
+
+It's possible to set the limit to zero or any positive integer. You can set this to a number other than max_connections, though it is up to you to make sense of that if you do. Setting the value to zero will completely restrict normal connections. Note that even if you set
+the connection limit to zero for superusers, they will still be able to connect.
+
+The connection limit is applied during session connection. Raising this limit will never affect any connected users. Lowering the limit doesn't have any effect either, unless they try to disconnect and reconnect. So, if you lower the limit, you should immediately check to see whether there are more sessions connected than the new limit you just set. Otherwise, there may be some surprises in case there is a crash:
+postgres=> SELECT rolconnlimit FROM pg_roles WHERE rolname = 'fred';
+rolconnlimit
+--------------
+1
+
+postgres=> SELECT count(*) FROM pg_stat_activity WHERE usename = 'fred';
+count
+-------
+2
+
+Forcing NOLOGIN users to disconnect
+-----------------------------------
+To temporarily prevent the user from logging in, run this command:
+pguser=# alter user bob nologin;
+
+In order to make sure that all users whose login privilege has been revoked are disconnected right away, run the following SQL statement as a superuser:
+
+pguser=# SELECT pg_terminate_backend(pid) FROM pg_stat_activity a
+JOIN pg_roles r ON a.usename = r.rolname AND not rolcanlogin;
+
+This disconnects all users who no longer are allowed to connect by terminating the backends opened by these users.
+
+
+A look at PostgreSQL 9.6 – Killing idle transactions automatically
+-------------------------------------------------------------------  
+A common issue with databases: The guy at floor 2 did some work on the database and then rashly left for lunch because the lady on floor 1 is already waiting for him. Unfortunately he did not close his transaction and now his session is blocking others. In PostgreSQL this might be even worse as all tuples modified by this transaction are not available for vacuum until the transaction is either committed or aborted. In PostgreSQL 9.6 there will be a way to minimize this risk.
+
+As always with PostgreSQL: If someone wants to add something to PostgreSQL core it starts with a mail tread. The result was a new parameter called idle_in_transaction_session_timeout. Lets see how this works.
+The default value of idle_in_transaction_session_timeout is 0, which means disabled:
+
+(postgres@[local]:5432) [postgres] > show idle_in_transaction_session_timeout;
+ idle_in_transaction_session_timeout 
+-------------------------------------
+ 0
+(1 row)
+I’ll set it to one minute…
+
+(postgres@[local]:5432) [postgres] > alter system set idle_in_transaction_session_timeout='1min';
+ALTER SYSTEM
+Lets create a user:
+
+(postgres@[local]:5432) [postgres] > create user u login password 'u';
+CREATE ROLE
+Using that user login and start a transaction without doing any further work:
+
+postgres@centos7:/home/postgres/ [PG1] psql postgres u -W
+Password for user u: 
+psql (9.6beta1 dbi services build)
+Type "help" for help.
+ 
+(u@[local]:5432) [postgres] > begin;
+BEGIN
+Btw: Being idle in transaction is reported in the process list, too:
+
+(postgres@[local]:5432) [postgres] > \! ps -ef | grep idle
+postgres  2712  2702  0 08:12 ?        00:00:00 postgres: postgres postgres [local] idle
+postgres  3072  2702  0 08:14 ?        00:00:00 postgres: u postgres [local] idle in transaction
+postgres  3412  2711  0 08:17 pts/0    00:00:00 sh -c ps -ef | grep idle
+postgres  3414  3412  0 08:17 pts/0    00:00:00 grep idle
+After one minute this is reported in the log file:
+
+2016-05-18 08:17:32.352 CEST - 1 - 3072 - [local] - u@postgres FATAL:  terminating connection due to idle-in-transaction timeout
+An attempt to do anything in the session that user u opened results in:
+
+(u@[local]:5432) [postgres] > select 1;
+FATAL:  terminating connection due to idle-in-transaction timeout
+server closed the connection unexpectedly
+        This probably means the server terminated abnormally
+        before or while processing the request.
+The connection to the server was lost. Attempting reset: Succeeded.
+Works well … no more killing sessions because guys head for lunch :)
+

@@ -1,0 +1,122 @@
+ieavu02 & ieavu14
+------------------------------
+
+Installer does the following:
+
+cd /usr/lib/systemd/system
+
+/usr/lib/systemd/system/postgresql-9.6.service
+
+create a file postgresql-9.6.service
+
+[ieavu02](root)> more /usr/lib/systemd/system/postgresql-9.6.service
+
+
+OK
+
+[Unit]
+Description=PostgreSQL 9.6 database server
+After=syslog.target network.target
+
+[Service]
+Type=forking
+TimeoutSec=120
+
+User=postgres
+
+Environment=PGDATA=/u10/pgsql/data
+PIDFILE=/u10/pgsql/data/postmaster.pid
+
+ExecStart=/u01/pgsql/9.6/bin/pg_ctl start -w -t ${TimeoutSec} -D "/u10/pgsql/data" -l "/u10/pgsql/data/pg_log/startup.log"
+ExecStop=/u01/pgsql/9.6/bin/pg_ctl stop -m fast -w -D "/u10/pgsql/data"
+ExecReload=/u01/pgsql/9.6/bin/pg_ctl reload -D "/u10/pgsql/data"
+
+[Install]
+WantedBy=multi-user.target
+
+
+
+
+>>>> Then create the link.......
+
+ln -s '/usr/lib/systemd/system/postgresql-9.6.service' '/etc/systemd/system/multi-user.target.wants/postgresql-9.6.service'
+
+cd /usr/lib/systemd/system 
+[ieavu02](root) /usr/lib/systemd/system > ls -l pos*
+-rw-r-----. 1 root root 514 Feb 23 19:56 postgresql-9.6.service
+-rw-r-----. 1 root root 538 Feb 23 19:55 postgresql-9.6.service.orig
+
+
+[ieavu02](root) /root >systemctl stop postgresql-9.6.service
+
+[ieavu02](root) /root >systemctl start postgresql-9.6.service
+
+
+Disable/Enable
+systemctl disable postgresql
+systemctl enable postgresql
+
+
+
+Make a systemd Postgres control script. Exit being the postgres user and go back to being root.
+---------------------------------------------------------------------------------------------------
+
+# cd /etc/systemd/system
+# vi postgresql.service
+[Unit]
+Description=PostgreSQL 9.6.2
+# This unit can only run after the network is up and running
+# (that is, the network target has run)
+After=network.target
+
+[Service]
+# PostgreSQL is a traditional UNIX daemon that forks a child, 
+# and the initial process exits
+Type=forking
+# Wait 120 seconds on startup and shutdown to consider the process
+# correctly started up or shut down.
+TimeoutSec=120
+# The UNIX user and group to execute PostgreSQL as
+User=postgres
+Group=postgres
+
+# Set the PGROOT environmental variable for PostgreSQL
+Environment=PGROOT=/u01/pgsql/9.6/bin
+
+# If StandardOutput= or StandardError= are set to syslog, journal or kmsg,
+# prefix log lines with "postgres"
+SyslogIdentifier=postgres
+
+# Let systemd know where PostgreSQL keeps its pid file
+PIDFile=/u10/pgsql/9.6/data/postmaster.pid
+
+# Command used to start PostgreSQL
+ExecStart= /u01/pgsql/9.6/pg_ctl -s -D ${PGROOT}/data start -w -t 120
+# Command used to reload PostgreSQL
+ExecReload=/u01/pgsql/9.6/bin/pg_ctl -s -D ${PGROOT}/data reload
+# Command used to stop PostgreSQL
+ExecStop=  /u01/pgsql/9.6bin/pg_ctl -s -D ${PGROOT}/data stop -m fast
+
+# Use the lowest allowable setting for the OOM killer; this should 
+# actually disable the OOM killer for PostgreSQL
+OOMScoreAdjust=-1000
+
+[Install]
+# This unit is part of target multi-user
+WantedBy=multi-user.target
+# systemctl daemon-reload
+
+Now start postgresql:
+
+[ieavu02](root) /root >systemctl stop postgresql-9.6.service
+
+[ieavu02](root) /root >systemctl start postgresql-9.6.service
+
+
+
+
+
+
+
+
+
